@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+
+if [ "$SUPERVISOR_PHP_USER" != "root" ] && [ "$SUPERVISOR_PHP_USER" != "sail" ]; then
+    echo "You should set SUPERVISOR_PHP_USER to either 'sail' or 'root'."
+    exit 1
+fi
+
+if [ ! -z "$WWWUSER" ]; then
+    usermod -u $WWWUSER sail
+fi
+
+if [ ! -d ~/.composer ]; then
+    mkdir ~/.composer
+fi
+
+if [ $# -gt 0 ]; then
+    if [ "$SUPERVISOR_PHP_USER" = "root" ]; then
+        exec "$@"
+    else
+        exec gosu $WWWUSER "$@"
+    fi
+
+    exit 0
+fi
+
+# Go to the root of the application
+cd /var/www/html
+
+# Setup Certificates if they dont exist
+if [ ! -d storage/app/keys ] \
+    || [ ! -f storage/app/keys/sp_saml.pem ] \
+    || [ ! -f storage/app/keys/sp_saml.crt ];
+then
+    cd storage/app
+    mkdir -p keys
+    openssl req -x509 -sha256 -nodes -days 365 -newkey rsa:4096 \
+        -subj "/C=DE/ST=Brandenburg/L=Cottbus/O=Studierendenrat/CN=localhost" \
+        -keyout keys/sp_saml.pem -out keys/sp_saml.crt
+    cd -
+fi
+
+# Setup Application Composer Dependencies
+if [ ! -d vendor ] \
+    || ! cmp --silent -- "composer.lock" "storage/installation/composer.lock";
+then
+    composer install
+    cp composer.lock storage/installation/composer.lock
+fi
+
+# Setup Application Environment
+if [ ! -f .env ] \
+    || ! cmp --silent -- ".env.example" "storage/installation/.env.example";
+then
+    cp .env.example .env
+    php artisan key:generate
+    cp .env.example storage/installation/.env.example
+fi
+
+# Setup Application Database
+if [ ! -f database/database.sqlite ];
+then
+    touch database/database.sqlite
+    php artisan migrate:fresh --seed
+else
+    php artisan migrate
+fi
+
+# Setup Test IdP
+cd /var/www/html/test-idp
+
+# Setup Test IdP Composer Dependencies
+if [ ! -d vendor ] \
+    || ! cmp --silent -- "composer.lock" "storage/installation/composer.lock";
+then
+    composer install
+    cp composer.lock storage/installation/composer.lock
+fi
+
+# Setup Test IdP Application Environment
+if [ ! -f .env ] \
+    || ! cmp --silent -- ".env.example" "storage/installation/.env.example";
+then
+    cp .env.example .env
+    php artisan key:generate
+    cp .env.example storage/installation/.env.example
+fi
+
+# Setup Test IdP Database
+if [ ! -f database/database.sqlite ];
+then
+    touch database/database.sqlite
+    php artisan migrate:fresh --seed
+else
+    php artisan migrate
+fi
+
+# Start Services
+exec sudo -E /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
